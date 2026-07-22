@@ -7,6 +7,8 @@ flag synchronization, local evaluation, and insight events remain owned by
 
 ## Installation
 
+Once the provider and the required FeatBit SDK version are published:
+
 ```shell
 pip install featbit-openfeature-server
 ```
@@ -72,3 +74,8 @@ than represented inaccurately.
 
 Unit tests use mocks, and the integration test uses FeatBit offline data. Neither
 requires a FeatBit account.
+
+```shell
+python -m pytest -q
+python -m flake8 featbit_openfeature tests
+```
