@@ -7,14 +7,12 @@ flag synchronization, local evaluation, and insight events remain owned by
 
 ## Installation
 
-Once the provider and the required FeatBit SDK version are published:
-
 ```shell
 pip install featbit-openfeature-server
 ```
 
-The initial implementation requires a FeatBit Python SDK release that exposes
-`EvalDetail.variation_id` (planned as `fb-python-sdk>=1.1.8`).
+The provider requires `fb-python-sdk>=1.1.8`, which exposes variation IDs and
+data-update status listeners.
 
 ## Usage
 
@@ -64,11 +62,39 @@ afterward so queued events are flushed and background resources are released.
 - FeatBit reasons and failures to OpenFeature `Reason` and `ErrorCode`.
 - FeatBit variation ID to OpenFeature `variant`.
 - FeatBit flag changes to `PROVIDER_CONFIGURATION_CHANGED`.
+- FeatBit runtime data-source status to OpenFeature provider status.
 - OpenFeature tracking value to `FBClient.track_metric()`.
 
 Structured evaluation-context attributes and tracking custom attributes are not
 supported by the current FeatBit user and metric schemas. They are ignored rather
 than represented inaccurately.
+
+## Provider status
+
+Applications can read the status through the standard OpenFeature client:
+
+```python
+from openfeature.provider import ProviderStatus
+
+status = client.get_provider_status()
+assert status in {
+    ProviderStatus.NOT_READY,
+    ProviderStatus.READY,
+    ProviderStatus.STALE,
+    ProviderStatus.ERROR,
+    ProviderStatus.FATAL,
+}
+```
+
+FeatBit states are mapped as follows:
+
+| FeatBit state | OpenFeature status |
+| --- | --- |
+| initializing | `NOT_READY` during provider initialization |
+| OK | `READY` |
+| interrupted | `STALE` |
+| permanently off | `FATAL` |
+| provider shutdown | `NOT_READY` |
 
 ## Development tests
 
@@ -78,4 +104,5 @@ requires a FeatBit account.
 ```shell
 python -m pytest -q
 python -m flake8 featbit_openfeature tests
+python -m build
 ```

@@ -7,7 +7,7 @@ from typing import Any
 
 from fbclient.client import FBClient
 from fbclient.flag_change_notification import FlagChangedListener, FlagChangedNotice
-from fbclient.status_types import StateType
+from fbclient.status_types import State, StateType
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import ProviderEventDetails
 from openfeature.exception import (
@@ -44,7 +44,12 @@ class _FlagChangeListener(FlagChangedListener):
 
 
 class FeatBitProvider(AbstractProvider):
-    """OpenFeature provider backed by an existing FeatBit ``FBClient``."""
+    """OpenFeature provider backed by an existing thread-safe ``FBClient``.
+
+    The provider does not own the client. ``shutdown`` removes the listeners
+    installed by the provider, but the application remains responsible for
+    calling ``FBClient.stop`` when it no longer needs the SDK.
+    """
 
     def __init__(self, client: FBClient, initialization_timeout: float = 15.0):
         super().__init__()
@@ -59,10 +64,11 @@ class FeatBitProvider(AbstractProvider):
         self._details_converter = ResolutionDetailsConverter()
         self._lifecycle_lock = threading.Lock()
         self._flag_change_listener: _FlagChangeListener | None = None
+        self._status_listener_registered = False
 
     @property
     def client(self) -> FBClient:
-        """Returns the FeatBit client supplied to this provider."""
+        """Return the FeatBit client supplied to this provider."""
         return self._client
 
     def initialize(self, evaluation_context: EvaluationContext) -> None:
@@ -77,19 +83,33 @@ class FeatBitProvider(AbstractProvider):
                     raise ProviderFatalError(message)
                 raise ProviderNotReadyError(message)
 
-        self._register_flag_change_listener()
+        self._register_listeners()
 
     def shutdown(self) -> None:
         with self._lifecycle_lock:
-            listener = self._flag_change_listener
-            self._flag_change_listener = None
+            flag_listener = self._flag_change_listener
+            status_listener_registered = self._status_listener_registered
 
-        if listener is None:
-            return
-        try:
-            self._client.flag_tracker.remove_flag_change_notifier(listener)
-        except Exception:
-            logger.exception("Failed to remove FeatBit flag change listener")
+        if flag_listener is not None:
+            try:
+                self._client.flag_tracker.remove_flag_change_notifier(flag_listener)
+            except Exception:
+                logger.exception("Failed to remove FeatBit flag change listener")
+            else:
+                with self._lifecycle_lock:
+                    if self._flag_change_listener is flag_listener:
+                        self._flag_change_listener = None
+
+        if status_listener_registered:
+            try:
+                self._client.update_status_provider.remove_listener(
+                    self._handle_data_update_status
+                )
+            except Exception:
+                logger.exception("Failed to remove FeatBit status listener")
+            else:
+                with self._lifecycle_lock:
+                    self._status_listener_registered = False
 
     def get_metadata(self) -> Metadata:
         return Metadata("featbit-openfeature-server")
@@ -158,7 +178,8 @@ class FeatBitProvider(AbstractProvider):
             if tracking_event_details is not None:
                 if tracking_event_details.attributes:
                     logger.debug(
-                        "FeatBit track_metric does not support tracking attributes; ignoring them"
+                        "FeatBit track_metric does not support tracking attributes; "
+                        "ignoring them"
                     )
                 if tracking_event_details.value is not None:
                     metric_value = float(tracking_event_details.value)
@@ -233,25 +254,56 @@ class FeatBitProvider(AbstractProvider):
             error_message="FeatBit flag value does not match the requested type",
         )
 
-    def _register_flag_change_listener(self) -> None:
+    def _register_listeners(self) -> None:
         with self._lifecycle_lock:
-            if self._flag_change_listener is not None:
-                return
-            listener = _FlagChangeListener(self._emit_configuration_changed)
-            try:
-                self._client.flag_tracker.add_flag_changed_listener(listener)
-            except Exception:
-                logger.exception("Failed to register FeatBit flag change listener")
-                return
-            self._flag_change_listener = listener
+            if not self._status_listener_registered:
+                try:
+                    self._client.update_status_provider.add_listener(
+                        self._handle_data_update_status
+                    )
+                except Exception:
+                    logger.exception("Failed to register FeatBit status listener")
+                else:
+                    self._status_listener_registered = True
+
+            if self._flag_change_listener is None:
+                listener = _FlagChangeListener(self._emit_configuration_changed)
+                try:
+                    self._client.flag_tracker.add_flag_changed_listener(listener)
+                except Exception:
+                    logger.exception("Failed to register FeatBit flag change listener")
+                else:
+                    self._flag_change_listener = listener
 
     def _emit_configuration_changed(self, flag_key: str) -> None:
-        self.emit_provider_configuration_changed(
-            ProviderEventDetails(flags_changed=[flag_key])
-        )
+        try:
+            self.emit_provider_configuration_changed(
+                ProviderEventDetails(flags_changed=[flag_key])
+            )
+        except Exception:
+            logger.exception("Failed to emit OpenFeature configuration change event")
+
+    def _handle_data_update_status(self, state: State) -> None:
+        try:
+            if state.state_type == StateType.OK:
+                self.emit_provider_ready(ProviderEventDetails())
+            elif state.state_type == StateType.INTERRUPTED:
+                self.emit_provider_stale(
+                    ProviderEventDetails(message=self._state_message(state))
+                )
+            elif state.state_type == StateType.OFF:
+                self.emit_provider_error(
+                    ProviderEventDetails(
+                        error_code=ErrorCode.PROVIDER_FATAL,
+                        message=self._state_message(state),
+                    )
+                )
+        except Exception:
+            logger.exception("Failed to emit OpenFeature provider status event")
 
     @staticmethod
     def _state_message(state: Any) -> str:
         error = getattr(state, "error_track", None)
         message = getattr(error, "message", None)
-        return message or "FeatBit client initialization did not complete"
+        state_type = getattr(getattr(state, "state_type", None), "name", "UNKNOWN")
+        return message or f"FeatBit data source state is {state_type}"

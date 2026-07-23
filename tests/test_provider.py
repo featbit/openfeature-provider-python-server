@@ -6,6 +6,7 @@ from fbclient.common_types import EvalDetail
 from fbclient.evaluator import REASON_CLIENT_NOT_READY, REASON_TARGET_MATCH
 from fbclient.flag_change_notification import FlagChangedNotice
 from fbclient.status_types import State
+from openfeature import api
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import ProviderEvent
 from openfeature.exception import (
@@ -14,6 +15,7 @@ from openfeature.exception import (
     ProviderNotReadyError,
 )
 from openfeature.flag_evaluation import Reason
+from openfeature.provider import ProviderStatus
 from openfeature.track import TrackingEventDetails
 
 from featbit_openfeature import FeatBitProvider
@@ -202,7 +204,77 @@ def test_flag_change_is_emitted_and_shutdown_removes_listener():
     assert event == ProviderEvent.PROVIDER_CONFIGURATION_CHANGED
     assert details.flags_changed == ["checkout"]
     client.flag_tracker.remove_flag_change_notifier.assert_called_once_with(listener)
+    client.update_status_provider.remove_listener.assert_called_once_with(
+        provider._handle_data_update_status
+    )
     client.stop.assert_not_called()
+
+
+def test_flag_change_callback_exception_never_escapes():
+    client = make_client()
+    provider = FeatBitProvider(client)
+    emitter = Mock(side_effect=RuntimeError("boom"))
+    provider.attach(emitter)
+    provider.initialize(EvaluationContext())
+    listener = client.flag_tracker.add_flag_changed_listener.call_args.args[0]
+
+    listener.on_flag_change(FlagChangedNotice("checkout"))
+
+    emitter.assert_called_once()
+
+
+def test_shutdown_retries_listener_removal_after_failure():
+    client = make_client()
+    provider = FeatBitProvider(client)
+    provider.initialize(EvaluationContext())
+    listener = client.flag_tracker.add_flag_changed_listener.call_args.args[0]
+    client.flag_tracker.remove_flag_change_notifier.side_effect = [
+        RuntimeError("boom"),
+        None,
+    ]
+
+    provider.shutdown()
+    provider.initialize(EvaluationContext())
+    provider.shutdown()
+
+    client.flag_tracker.add_flag_changed_listener.assert_called_once_with(listener)
+    assert client.flag_tracker.remove_flag_change_notifier.call_count == 2
+
+
+def test_runtime_featbit_status_updates_openfeature_provider_status():
+    client = make_client()
+    provider = FeatBitProvider(client)
+
+    try:
+        api.set_provider_and_wait(provider)
+        openfeature_client = api.get_client()
+        listener = client.update_status_provider.add_listener.call_args.args[0]
+
+        assert openfeature_client.get_provider_status() == ProviderStatus.READY
+
+        listener(State.interrupted_state("network", "connection lost"))
+        assert openfeature_client.get_provider_status() == ProviderStatus.STALE
+
+        listener(State.ok_state())
+        assert openfeature_client.get_provider_status() == ProviderStatus.READY
+
+        listener(State.error_off_state("credential", "invalid secret"))
+        assert openfeature_client.get_provider_status() == ProviderStatus.FATAL
+    finally:
+        api.shutdown()
+
+
+def test_status_callback_exception_never_escapes():
+    client = make_client()
+    provider = FeatBitProvider(client)
+    emitter = Mock(side_effect=RuntimeError("boom"))
+    provider.attach(emitter)
+
+    provider._handle_data_update_status(
+        State.interrupted_state("network", "connection lost")
+    )
+
+    emitter.assert_called_once()
 
 
 def test_track_maps_numeric_value_and_context():
