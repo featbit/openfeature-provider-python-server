@@ -62,7 +62,10 @@ class FeatBitProvider(AbstractProvider):
         self._initialization_timeout = initialization_timeout
         self._context_converter = EvaluationContextConverter()
         self._details_converter = ResolutionDetailsConverter()
-        self._lifecycle_lock = threading.Lock()
+        # Listener registration and event emission can synchronously re-enter
+        # provider lifecycle methods through user callbacks.
+        self._lifecycle_lock = threading.RLock()
+        self._shutdown_started = False
         self._flag_change_listener: _FlagChangeListener | None = None
         self._status_listener_registered = False
 
@@ -75,19 +78,23 @@ class FeatBitProvider(AbstractProvider):
         # Register before waiting so a client that connects just after an
         # initialization timeout can still publish its recovery to OpenFeature.
         self._register_listeners()
-        if not self._client.initialize:
-            ready = self._client.update_status_provider.wait_for_OKState(
-                self._initialization_timeout
-            )
-            if not ready:
-                state = self._client.update_status_provider.current_state
-                message = self._state_message(state)
-                if state.state_type == StateType.OFF:
-                    raise ProviderFatalError(message)
-                raise ProviderNotReadyError(message)
+        with self._lifecycle_lock:
+            if self._shutdown_started:
+                raise ProviderFatalError("FeatBit provider is shut down")
+
+        ready = self._client.update_status_provider.wait_for_OKState(
+            self._initialization_timeout
+        )
+        if not ready:
+            state = self._client.update_status_provider.current_state
+            message = self._state_message(state)
+            if state.state_type == StateType.OFF:
+                raise ProviderFatalError(message)
+            raise ProviderNotReadyError(message)
 
     def shutdown(self) -> None:
         with self._lifecycle_lock:
+            self._shutdown_started = True
             flag_listener = self._flag_change_listener
             status_listener_registered = self._status_listener_registered
 
@@ -264,6 +271,9 @@ class FeatBitProvider(AbstractProvider):
 
     def _register_listeners(self) -> None:
         with self._lifecycle_lock:
+            if self._shutdown_started:
+                return
+
             if not self._status_listener_registered:
                 try:
                     self._client.update_status_provider.add_listener(
@@ -285,32 +295,33 @@ class FeatBitProvider(AbstractProvider):
 
     def _emit_configuration_changed(self, flag_key: str) -> None:
         try:
-            self.emit_provider_configuration_changed(
-                ProviderEventDetails(flags_changed=[flag_key])
-            )
+            with self._lifecycle_lock:
+                if self._shutdown_started:
+                    return
+                self.emit_provider_configuration_changed(
+                    ProviderEventDetails(flags_changed=[flag_key])
+                )
         except Exception:
             logger.exception("Failed to emit OpenFeature configuration change event")
 
     def _handle_data_update_status(self, state: State) -> None:
         try:
-            if state.state_type == StateType.OK:
-                self.emit_provider_ready(ProviderEventDetails())
-            elif state.state_type == StateType.INTERRUPTED:
-                self.emit_provider_stale(
-                    ProviderEventDetails(message=self._state_message(state))
-                )
-            elif state.state_type == StateType.OFF:
-                if state.error_track is not None:
+            with self._lifecycle_lock:
+                if self._shutdown_started:
+                    return
+                if state.state_type == StateType.OK:
+                    self.emit_provider_ready(ProviderEventDetails())
+                elif state.state_type == StateType.INTERRUPTED:
+                    self.emit_provider_stale(
+                        ProviderEventDetails(message=self._state_message(state))
+                    )
+                elif state.state_type == StateType.OFF:
                     self.emit_provider_error(
                         ProviderEventDetails(
                             error_code=ErrorCode.PROVIDER_FATAL,
                             message=self._state_message(state),
                         )
                     )
-                # A normal OFF is produced by FBClient.stop(). Provider
-                # shutdown unregisters this listener before stopping the
-                # client; OpenFeature then removes the provider status, whose
-                # standard fallback is NOT_READY. Do not misreport it FATAL.
         except Exception:
             logger.exception("Failed to emit OpenFeature provider status event")
 

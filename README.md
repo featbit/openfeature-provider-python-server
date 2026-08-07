@@ -92,9 +92,11 @@ FeatBit states are mapped as follows:
 | initializing | `NOT_READY` during provider initialization |
 | OK | `READY` |
 | interrupted | `STALE` |
-| normal off during provider shutdown | `NOT_READY` |
-| permanently off with an error | `FATAL` |
-| provider shutdown | `NOT_READY` |
+| off observed while provider is active | `FATAL` |
+
+After `api.shutdown()`, OpenFeature removes this provider and installs its default
+no-op provider. Status after that point belongs to the OpenFeature SDK rather than
+to FeatBit.
 
 The included `py.typed` marker declares this package as PEP 561 typed, allowing
 type checkers to use the annotations shipped with the provider after install.

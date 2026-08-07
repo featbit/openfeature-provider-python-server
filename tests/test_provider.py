@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Thread
 from unittest.mock import Mock
 
 import pytest
@@ -26,6 +27,7 @@ def make_client(initialized=True):
     client.initialize = initialized
     client.flag_tracker = Mock()
     client.update_status_provider = Mock()
+    client.update_status_provider.wait_for_OKState.return_value = True
     return client
 
 
@@ -149,7 +151,7 @@ def test_initialize_returns_immediately_when_client_is_ready():
 
     provider.initialize(EvaluationContext())
 
-    client.update_status_provider.wait_for_OKState.assert_not_called()
+    client.update_status_provider.wait_for_OKState.assert_called_once_with(15.0)
     client.flag_tracker.add_flag_changed_listener.assert_called_once()
 
 
@@ -256,6 +258,48 @@ def test_shutdown_never_exposes_client_stop_failure():
     client.stop.assert_called_once_with()
 
 
+def test_shutdown_prevents_concurrent_listener_registration_and_events():
+    client = make_client()
+    provider = FeatBitProvider(client)
+    emitter = Mock()
+    provider.attach(emitter)
+    stop_entered = Event()
+    release_stop = Event()
+
+    def blocking_stop():
+        stop_entered.set()
+        release_stop.wait(timeout=2)
+
+    client.stop.side_effect = blocking_stop
+    shutdown_thread = Thread(target=provider.shutdown)
+    shutdown_thread.start()
+    assert stop_entered.wait(timeout=2)
+
+    provider._register_listeners()
+    provider._handle_data_update_status(State.ok_state())
+    provider._emit_configuration_changed("checkout")
+
+    release_stop.set()
+    shutdown_thread.join(timeout=2)
+    assert not shutdown_thread.is_alive()
+    client.update_status_provider.add_listener.assert_not_called()
+    client.flag_tracker.add_flag_changed_listener.assert_not_called()
+    emitter.assert_not_called()
+
+
+def test_initialize_after_shutdown_is_fatal_and_registers_no_listeners():
+    client = make_client()
+    provider = FeatBitProvider(client)
+    provider.shutdown()
+
+    with pytest.raises(ProviderFatalError):
+        provider.initialize(EvaluationContext())
+
+    client.update_status_provider.add_listener.assert_not_called()
+    client.flag_tracker.add_flag_changed_listener.assert_not_called()
+    client.update_status_provider.wait_for_OKState.assert_not_called()
+
+
 def test_runtime_featbit_status_updates_openfeature_provider_status():
     client = make_client()
     provider = FeatBitProvider(client)
@@ -273,17 +317,16 @@ def test_runtime_featbit_status_updates_openfeature_provider_status():
         listener(State.ok_state())
         assert openfeature_client.get_provider_status() == ProviderStatus.READY
 
-        # A clean OFF is the result of lifecycle shutdown and must not be
-        # reported as a fatal provider failure.
+        # Any OFF observed while the provider is active means the underlying
+        # client can no longer evaluate flags safely.
         listener(State.normal_off_state())
-        assert openfeature_client.get_provider_status() == ProviderStatus.READY
-
-        listener(State.error_off_state("credential", "invalid secret"))
         assert openfeature_client.get_provider_status() == ProviderStatus.FATAL
     finally:
         api.shutdown()
 
-    assert openfeature_client.get_provider_status() == ProviderStatus.NOT_READY
+    # OpenFeature shutdown replaces the registered provider with its ready
+    # no-op provider; the FeatBit provider itself no longer emits events.
+    assert openfeature_client.get_provider_status() == ProviderStatus.READY
     client.stop.assert_called_once_with()
 
 
