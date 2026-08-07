@@ -48,12 +48,11 @@ details = client.get_boolean_details(
 print(details.value, details.reason, details.variant)
 
 api.shutdown()
-fb_client.stop()
 ```
 
-The application owns the injected `FBClient`. Calling `api.shutdown()` removes
-provider listeners but does not stop the FeatBit client; call `fb_client.stop()`
-afterward so queued events are flushed and background resources are released.
+The provider owns the injected `FBClient`. Calling `api.shutdown()` removes
+provider listeners and stops the FeatBit client so queued events are flushed
+and background resources are released.
 
 ## Supported mappings
 
@@ -93,8 +92,12 @@ FeatBit states are mapped as follows:
 | initializing | `NOT_READY` during provider initialization |
 | OK | `READY` |
 | interrupted | `STALE` |
-| permanently off | `FATAL` |
+| normal off during provider shutdown | `NOT_READY` |
+| permanently off with an error | `FATAL` |
 | provider shutdown | `NOT_READY` |
+
+The included `py.typed` marker declares this package as PEP 561 typed, allowing
+type checkers to use the annotations shipped with the provider after install.
 
 ## Development tests
 
@@ -106,3 +109,14 @@ python -m pytest -q
 python -m flake8 featbit_openfeature tests
 python -m build
 ```
+
+## Release
+
+Publishing is handled by `.github/workflows/release.yml` when a GitHub Release
+is published. The build and publish jobs are separated so package build code
+never receives an OpenID Connect token. The publish job uses PyPI Trusted
+Publishing and does not store a long-lived PyPI password in GitHub.
+
+Before the first release, configure the PyPI trusted publisher with owner
+`featbit`, repository `openfeature-provider-python-server`, workflow
+`release.yml`, and GitHub environment `pypi`.

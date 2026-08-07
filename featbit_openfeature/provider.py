@@ -46,9 +46,9 @@ class _FlagChangeListener(FlagChangedListener):
 class FeatBitProvider(AbstractProvider):
     """OpenFeature provider backed by an existing thread-safe ``FBClient``.
 
-    The provider does not own the client. ``shutdown`` removes the listeners
-    installed by the provider, but the application remains responsible for
-    calling ``FBClient.stop`` when it no longer needs the SDK.
+    The provider owns the injected client's lifecycle. ``shutdown`` removes
+    its listeners and stops the client so queued events and background
+    resources are released with the OpenFeature lifecycle.
     """
 
     def __init__(self, client: FBClient, initialization_timeout: float = 15.0):
@@ -72,6 +72,9 @@ class FeatBitProvider(AbstractProvider):
         return self._client
 
     def initialize(self, evaluation_context: EvaluationContext) -> None:
+        # Register before waiting so a client that connects just after an
+        # initialization timeout can still publish its recovery to OpenFeature.
+        self._register_listeners()
         if not self._client.initialize:
             ready = self._client.update_status_provider.wait_for_OKState(
                 self._initialization_timeout
@@ -82,8 +85,6 @@ class FeatBitProvider(AbstractProvider):
                 if state.state_type == StateType.OFF:
                     raise ProviderFatalError(message)
                 raise ProviderNotReadyError(message)
-
-        self._register_listeners()
 
     def shutdown(self) -> None:
         with self._lifecycle_lock:
@@ -110,6 +111,13 @@ class FeatBitProvider(AbstractProvider):
             else:
                 with self._lifecycle_lock:
                     self._status_listener_registered = False
+
+        try:
+            self._client.stop()
+        except Exception:
+            # Provider shutdown is application lifecycle code; an extension
+            # failure in the underlying SDK must not escape into OpenFeature.
+            logger.exception("Failed to stop FeatBit client")
 
     def get_metadata(self) -> Metadata:
         return Metadata("featbit-openfeature-server")
@@ -292,12 +300,17 @@ class FeatBitProvider(AbstractProvider):
                     ProviderEventDetails(message=self._state_message(state))
                 )
             elif state.state_type == StateType.OFF:
-                self.emit_provider_error(
-                    ProviderEventDetails(
-                        error_code=ErrorCode.PROVIDER_FATAL,
-                        message=self._state_message(state),
+                if state.error_track is not None:
+                    self.emit_provider_error(
+                        ProviderEventDetails(
+                            error_code=ErrorCode.PROVIDER_FATAL,
+                            message=self._state_message(state),
+                        )
                     )
-                )
+                # A normal OFF is produced by FBClient.stop(). Provider
+                # shutdown unregisters this listener before stopping the
+                # client; OpenFeature then removes the provider status, whose
+                # standard fallback is NOT_READY. Do not misreport it FATAL.
         except Exception:
             logger.exception("Failed to emit OpenFeature provider status event")
 

@@ -46,4 +46,3 @@ def test_openfeature_client_evaluates_with_real_featbit_sdk_offline():
         assert client.get_provider_status() == ProviderStatus.READY
     finally:
         api.shutdown()
-        fb_client.stop()

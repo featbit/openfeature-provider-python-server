@@ -172,6 +172,10 @@ def test_initialize_timeout_raises_provider_not_ready():
     with pytest.raises(ProviderNotReadyError):
         provider.initialize(EvaluationContext())
 
+    client.update_status_provider.add_listener.assert_called_once_with(
+        provider._handle_data_update_status
+    )
+
 
 def test_initialize_off_state_raises_provider_fatal():
     client = make_client(initialized=False)
@@ -207,7 +211,7 @@ def test_flag_change_is_emitted_and_shutdown_removes_listener():
     client.update_status_provider.remove_listener.assert_called_once_with(
         provider._handle_data_update_status
     )
-    client.stop.assert_not_called()
+    assert client.stop.call_count == 2
 
 
 def test_flag_change_callback_exception_never_escapes():
@@ -234,11 +238,22 @@ def test_shutdown_retries_listener_removal_after_failure():
     ]
 
     provider.shutdown()
-    provider.initialize(EvaluationContext())
     provider.shutdown()
 
     client.flag_tracker.add_flag_changed_listener.assert_called_once_with(listener)
     assert client.flag_tracker.remove_flag_change_notifier.call_count == 2
+    assert client.stop.call_count == 2
+
+
+def test_shutdown_never_exposes_client_stop_failure():
+    client = make_client()
+    client.stop.side_effect = RuntimeError("boom")
+    provider = FeatBitProvider(client)
+    provider.initialize(EvaluationContext())
+
+    provider.shutdown()
+
+    client.stop.assert_called_once_with()
 
 
 def test_runtime_featbit_status_updates_openfeature_provider_status():
@@ -258,10 +273,18 @@ def test_runtime_featbit_status_updates_openfeature_provider_status():
         listener(State.ok_state())
         assert openfeature_client.get_provider_status() == ProviderStatus.READY
 
+        # A clean OFF is the result of lifecycle shutdown and must not be
+        # reported as a fatal provider failure.
+        listener(State.normal_off_state())
+        assert openfeature_client.get_provider_status() == ProviderStatus.READY
+
         listener(State.error_off_state("credential", "invalid secret"))
         assert openfeature_client.get_provider_status() == ProviderStatus.FATAL
     finally:
         api.shutdown()
+
+    assert openfeature_client.get_provider_status() == ProviderStatus.NOT_READY
+    client.stop.assert_called_once_with()
 
 
 def test_status_callback_exception_never_escapes():
