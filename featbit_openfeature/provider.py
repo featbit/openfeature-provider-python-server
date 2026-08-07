@@ -62,9 +62,7 @@ class FeatBitProvider(AbstractProvider):
         self._initialization_timeout = initialization_timeout
         self._context_converter = EvaluationContextConverter()
         self._details_converter = ResolutionDetailsConverter()
-        # Listener registration and event emission can synchronously re-enter
-        # provider lifecycle methods through user callbacks.
-        self._lifecycle_lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
         self._shutdown_started = False
         self._flag_change_listener: _FlagChangeListener | None = None
         self._status_listener_registered = False
@@ -295,12 +293,9 @@ class FeatBitProvider(AbstractProvider):
 
     def _emit_configuration_changed(self, flag_key: str) -> None:
         try:
-            with self._lifecycle_lock:
-                if self._shutdown_started:
-                    return
-                self.emit_provider_configuration_changed(
-                    ProviderEventDetails(flags_changed=[flag_key])
-                )
+            self.emit_provider_configuration_changed(
+                ProviderEventDetails(flags_changed=[flag_key])
+            )
         except Exception:
             logger.exception("Failed to emit OpenFeature configuration change event")
 
@@ -309,19 +304,19 @@ class FeatBitProvider(AbstractProvider):
             with self._lifecycle_lock:
                 if self._shutdown_started:
                     return
-                if state.state_type == StateType.OK:
-                    self.emit_provider_ready(ProviderEventDetails())
-                elif state.state_type == StateType.INTERRUPTED:
-                    self.emit_provider_stale(
-                        ProviderEventDetails(message=self._state_message(state))
+            if state.state_type == StateType.OK:
+                self.emit_provider_ready(ProviderEventDetails())
+            elif state.state_type == StateType.INTERRUPTED:
+                self.emit_provider_stale(
+                    ProviderEventDetails(message=self._state_message(state))
+                )
+            elif state.state_type == StateType.OFF:
+                self.emit_provider_error(
+                    ProviderEventDetails(
+                        error_code=ErrorCode.PROVIDER_FATAL,
+                        message=self._state_message(state),
                     )
-                elif state.state_type == StateType.OFF:
-                    self.emit_provider_error(
-                        ProviderEventDetails(
-                            error_code=ErrorCode.PROVIDER_FATAL,
-                            message=self._state_message(state),
-                        )
-                    )
+                )
         except Exception:
             logger.exception("Failed to emit OpenFeature provider status event")
 

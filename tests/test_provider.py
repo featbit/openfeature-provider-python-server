@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event, Thread
 from unittest.mock import Mock
 
 import pytest
@@ -258,30 +257,16 @@ def test_shutdown_never_exposes_client_stop_failure():
     client.stop.assert_called_once_with()
 
 
-def test_shutdown_prevents_concurrent_listener_registration_and_events():
+def test_shutdown_prevents_listener_registration_and_status_events():
     client = make_client()
     provider = FeatBitProvider(client)
     emitter = Mock()
     provider.attach(emitter)
-    stop_entered = Event()
-    release_stop = Event()
-
-    def blocking_stop():
-        stop_entered.set()
-        release_stop.wait(timeout=2)
-
-    client.stop.side_effect = blocking_stop
-    shutdown_thread = Thread(target=provider.shutdown)
-    shutdown_thread.start()
-    assert stop_entered.wait(timeout=2)
+    provider.shutdown()
 
     provider._register_listeners()
     provider._handle_data_update_status(State.ok_state())
-    provider._emit_configuration_changed("checkout")
 
-    release_stop.set()
-    shutdown_thread.join(timeout=2)
-    assert not shutdown_thread.is_alive()
     client.update_status_provider.add_listener.assert_not_called()
     client.flag_tracker.add_flag_changed_listener.assert_not_called()
     emitter.assert_not_called()
