@@ -21,9 +21,8 @@ from openfeature.track import TrackingEventDetails
 from featbit_openfeature import FeatBitProvider
 
 
-def make_client(initialized=True):
+def make_client():
     client = Mock()
-    client.initialize = initialized
     client.flag_tracker = Mock()
     client.update_status_provider = Mock()
     client.update_status_provider.wait_for_OKState.return_value = True
@@ -145,7 +144,7 @@ def test_unexpected_evaluation_exception_never_escapes():
 
 
 def test_initialize_returns_immediately_when_client_is_ready():
-    client = make_client(initialized=True)
+    client = make_client()
     provider = FeatBitProvider(client)
 
     provider.initialize(EvaluationContext())
@@ -155,7 +154,7 @@ def test_initialize_returns_immediately_when_client_is_ready():
 
 
 def test_initialize_waits_for_ready_client():
-    client = make_client(initialized=False)
+    client = make_client()
     client.update_status_provider.wait_for_OKState.return_value = True
     provider = FeatBitProvider(client, initialization_timeout=3)
 
@@ -165,7 +164,7 @@ def test_initialize_waits_for_ready_client():
 
 
 def test_initialize_timeout_raises_provider_not_ready():
-    client = make_client(initialized=False)
+    client = make_client()
     client.update_status_provider.wait_for_OKState.return_value = False
     client.update_status_provider.current_state = State.intializing_state()
     provider = FeatBitProvider(client, initialization_timeout=3)
@@ -179,7 +178,7 @@ def test_initialize_timeout_raises_provider_not_ready():
 
 
 def test_initialize_off_state_raises_provider_fatal():
-    client = make_client(initialized=False)
+    client = make_client()
     client.update_status_provider.wait_for_OKState.return_value = False
     client.update_status_provider.current_state = State.error_off_state(
         "credential", "invalid environment secret"
