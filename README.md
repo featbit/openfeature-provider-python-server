@@ -11,8 +11,8 @@ flag synchronization, local evaluation, and insight events remain owned by
 pip install featbit-openfeature-server
 ```
 
-The provider requires `fb-python-sdk>=1.1.8`, which exposes variation IDs and
-data-update status listeners.
+The provider supports Python 3.10–3.14 and requires `fb-python-sdk>=1.1.10`,
+which exposes variation IDs and data-update status listeners.
 
 ## Usage
 

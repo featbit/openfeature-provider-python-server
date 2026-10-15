@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -26,10 +26,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "openfeature-sdk>=0.10,<1" "build>=1,<2" "flake8>=7,<8" "pytest>=8,<10"
-          # Temporary immutable pin until fb-python-sdk 1.1.8 is published.
-          python -m pip install "fb-python-sdk @ git+https://github.com/featbit/featbit-python-sdk.git@7c74e19bbb5934084802c0bee2cab6d39f4ec00d"
-          python -m pip install -e . --no-deps
+          python -m pip install -e ".[dev]"
           python -m pip check
       - name: Lint
         run: python -m flake8 featbit_openfeature tests
