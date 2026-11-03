@@ -12,7 +12,7 @@ license = "Apache-2.0"
 authors = [{name = "FeatBit"}]
 dependencies = [
     "openfeature-sdk>=0.10,<1",
-    "fb-python-sdk>=1.1.10,<2",
+    "fb-python-sdk>=1.2.0,<2",
 ]
 
 [project.optional-dependencies]
